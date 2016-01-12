@@ -5,6 +5,7 @@ var execute = function (str) {
 	var p = new parser.Parser();
 	try {
 		node = p.parse(str);
+		console.log(node.norm_text());
 		console.log(JSON.stringify(node, null, '    '));
 	} catch (e) {
 		console.log(e);

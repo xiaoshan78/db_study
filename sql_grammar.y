@@ -8,6 +8,23 @@ LBR    \r\n|\r|\n
 
 \s+                  						/* ignore whitespace */
 
+\'(\'\'|[^\'])*\'		%{
+							yytext = yytext.substr(1, yyleng - 2);
+							return 'STRING';
+						%}
+
+\"(\"\"|[^\"])*\"		%{
+							yytext = yytext.substr(1, yyleng - 2);
+							return 'IDENTIFIER';
+						%}
+
+[a-zA-Z][0-9a-zA-Z_]*	return make_keyword_or_identifier(yytext);
+\d+\.\d*				return 'NON_NEGTIVE_FLOAT1';
+\.\d+					return 'NON_NEGTIVE_FLOAT2';
+[1-9]\d*				return 'POSITIVE_INT';
+\d+						return 'NON_NEGTIVE_INT';
+
+"//".*					/* ignore comment */
 
 "("						return '(';
 ")"						return ')';
@@ -23,37 +40,22 @@ LBR    \r\n|\r|\n
 "<"						return '<';
 ">="					return '>=;';
 ">"						return '>';
+"."						return '.';
 ","						return ',';
-
-
-\'(\'\'|[^\'])*\'		%{
-							yytext = yytext.substr(1, yyleng - 2);
-							return 'STRING';
-						%}
-
-\"(\"\"|[^\"])*\"		%{
-							yytext = yytext.substr(1, yyleng - 2);
-							return 'IDENTIFIER';
-						%}
-
-[a-zA-Z][0-9a-zA-Z_]*	return make_keyword_or_identifier(yytext);
-[1-9][0-9]*				return 'POSITIVE_INT';
-[1-9][0-9]*\.([0-9]*)?	return 'POSITIVE_FLOAT';
-
-
-"//".*					/* ignore comment */
 
 <<EOF>>					/* return 'EOF' */
 
 /lex
 
-%left OR
-%left AND
-%right NOT
+%expect n
 
-%left '==' '!=' '<>' '<' '<=' '>' '>='
-%left '+' '-'
-%left '*' '/'
+%left OR								/* prec: 10 */
+%left AND								/* prec: 20 */
+%right NOT								/* prec: 30 */
+
+%left '=' '!=' '<>' '<' '<=' '>' '>=', 'IS'	/* prec: 40 */
+%left '+' '-'								/* prec: 50 */
+%left '*' '/'								/* prec: 60 */
 
 %start Expressions
 
@@ -66,7 +68,9 @@ PositiveInteger
 
 Identifier
 	: IDENTIFIER
-		{ $$ = yytext; }
+		{
+			$$ = yytext;
+		}
 	;
 
 TypeToken
@@ -74,14 +78,20 @@ TypeToken
 		{
 			$$ = {
 				type: 'int',
-				length: 4
+				length: 4,
+				norm_text: function () {
+					return "int";
+				}
 			};
 		}
 	| VARCHAR '(' PositiveInteger ')'
 		{
 			$$ = {
 				type: 'varchar',
-				length: $3
+				length: $3,
+				norm_text: function () {
+					return "varchar(" + this.length + ")";
+				}
 			};
 		}
 	;
@@ -92,7 +102,10 @@ ColumnDef
 			$$ = {
 				type: 'ColumnDef',
 				column_name: $1,
-				column_type: $2
+				column_type: $2,
+				norm_text: function () {
+					return this.column_name + " " + this.column.type;
+				}
 			};
 		}
 	;
@@ -115,7 +128,10 @@ CreateStmt
 			$$ = {
 				type: 'CreateStmt',
 				table_name: $3,
-				column_defs: $5
+				column_defs: $5,
+				norm_text: function () {
+					return "CREATE TABLE " + this.table_name + " (" + norm_array(this.column_defs) + ")";
+				}
 			};
 		}
 	;
@@ -137,9 +153,17 @@ Number
 		{ $$ = +($1); }
 	| '-' POSITIVE_INT
 		{ $$ = -($1); }
-	| POSITIVE_FLOAT
+	| NON_NEGTIVE_INT
 		{ $$ = +($1); }
-	| '-' POSITIVE_FLOAT
+	| '-' NON_NEGTIVE_INT
+		{ $$ = -($1); }
+	| NON_NEGTIVE_FLOAT1
+		{ $$ = +($1); }
+	| '-' NON_NEGTIVE_FLOAT1
+		{ $$ = +($1); }
+	| NON_NEGTIVE_FLOAT2
+		{ $$ = +($1); }
+	| '-' NON_NEGTIVE_FLOAT2
 		{ $$ = +($1); }
 	;
 
@@ -174,7 +198,10 @@ InsertStmt
 				type: 'InsertStmt',
 				table_name: $3,
 				column_names: $5,
-				values: $9
+				values: $9,
+				norm_text: function () {
+					return "INSERT INTO " + this.table_name + " (" + this.column_names.join(",") + ") VALUES (" + this.values.join(",") + ")";
+				}
 			};
 		}
 	;
@@ -185,7 +212,18 @@ Expr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'identifier',
-				value: $1
+				value: $1,
+				norm_text: function () { return this.value; }
+			};
+		}
+	| Identifier '.' Identifier
+		{
+			$$ = {
+				type: 'Expr',
+				sub_type: 'identifier2',
+				value1: $1,
+				value2: $3,
+				norm_text: function () { return this.value1 + "." + this.value2; }
 			};
 		}
 	| String
@@ -193,7 +231,8 @@ Expr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'string',
-				value: $1
+				value: $1,
+				norm_text: function () { return "'" + escape_string(this.value) + "'"; }
 			};
 		}
 	| Number
@@ -201,7 +240,8 @@ Expr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'number',
-				value: $1
+				value: $1,
+				norm_text: function () { return this.value; }
 			};
 		}
 	| Identifier '(' ExprList ')'
@@ -210,7 +250,8 @@ Expr
 				type: 'Expr',
 				sub_type: 'function',
 				function_name: $1,
-				function_args: $3
+				function_args: $3,
+				norm_text: function () { return this.function_name + "(" + norm_array(this.function_args) + ")"; }
 			};
 		}
 	| '(' Expr ')'
@@ -223,8 +264,10 @@ Expr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 50,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '-' Expr
@@ -233,8 +276,10 @@ Expr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 50,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '*' Expr
@@ -243,8 +288,10 @@ Expr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 60,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '/' Expr
@@ -253,8 +300,10 @@ Expr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 60,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	;
@@ -278,8 +327,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '!=' Expr
@@ -288,8 +339,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '<>' Expr
@@ -298,8 +351,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '>=' Expr
@@ -308,8 +363,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '>' Expr
@@ -318,8 +375,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '<=' Expr
@@ -328,8 +387,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr '<' Expr
@@ -338,8 +399,10 @@ CompareExpr
 				type: 'Expr',
 				sub_type: 'binary_op',
 				op: $2,
+				prec: 40,
 				left: $1,
-				right: $3
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
 			};
 		}
 	| Expr IS NULL
@@ -347,8 +410,12 @@ CompareExpr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'unary_op',
-				op: 'is_null',
-				value: $1
+				op: 'IS_NULL',
+				prec: 40,
+				value: $1,
+				norm_text: function () {
+					return this.value.norm_text() + " IS NULL";
+				}
 			};
 		}
 	| Expr IS NOT NULL
@@ -356,8 +423,12 @@ CompareExpr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'unary_op',
-				op: 'not_is_null',
-				value: $1
+				op: 'NOT_IS_NULL',
+				prec: 40,
+				value: $1,
+				norm_text: function () {
+					return this.value.norm_text() + " IS NOT NULL";
+				}
 			};
 		}
 	| Expr NOT IS NULL
@@ -365,8 +436,12 @@ CompareExpr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'unary_op',
-				op: 'not_is_null',
-				value: $1
+				op: 'NOT_IS_NULL',
+				prec: 40,
+				value: $1,
+				norm_text: function () {
+					return this.value.norm_text() + " IS NOT NULL";
+				}
 			};
 		}
 	;
@@ -385,29 +460,37 @@ LogicExpr
 			$$ = {
 				type: 'Expr',
 				sub_type: 'binary_op',
-				op: 'and',
+				op: 'AND',
+				prec: 20,
 				left: $1,
-				right: $3
-			}
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
+			};
 		}
 	| LogicExpr OR LogicExpr
 		{
 			$$ = {
 				type: 'Expr',
 				sub_type: 'binary_op',
-				op: 'or',
+				op: 'OR',
+				prec: 10,
 				left: $1,
-				right: $3
-			}
+				right: $3,
+				norm_text: function () { return norm_expr(this.left, this.prec) + " " + this.op + " " + norm_expr(this.right, this.prec) }
+			};
 		}
 	| NOT LogicExpr
 		{
 			$$ = {
 				type: 'Expr',
 				sub_type: 'unary_op',
-				op: 'not',
-				value: $2
-			}
+				op: 'NOT',
+				prec: 30,
+				value: $2,
+				norm_text: function () {
+					return "NOT " + norm_expr(this.value);
+				}
+			};
 		}
 	;
 
@@ -432,7 +515,15 @@ JoinQulifier
 
 JoinCond
 	: ON LogicExpr
-		{ $$ = $1; }
+		{
+			$$ = {
+				type: 'JoinCond',
+				value: $2,
+				norm_text: function () {
+					return "ON " + this.value.norm_text();
+				}
+			};
+		}
 	;
 
 SubQuery
@@ -442,7 +533,10 @@ SubQuery
 				type: 'SubQuery',
 				sub_type: 'single',
 				query: $1,
-				table_alias: null
+				table_alias: null,
+				norm_text: function () {
+					return this.query;
+				}
 			};
 		}
 	| Identifier opt_AS Identifier
@@ -451,7 +545,10 @@ SubQuery
 				type: 'SubQuery',
 				sub_type: 'single',
 				query: $1,
-				table_alias: $3
+				table_alias: $3,
+				norm_text: function () {
+					return this.query + " AS " + this.table_alias;
+				}
 			};
 		}
 	| '(' SelectStmt ')'
@@ -460,7 +557,10 @@ SubQuery
 				type: 'SubQuery',
 				sub_type: 'query',
 				query: $2,
-				table_alias: null
+				table_alias: null,
+				norm_text: function () {
+					return "(" + this.query.norm_text() + ")";
+				}
 			};
 		}
 	| '(' SelectStmt ')' opt_AS Identifier
@@ -469,7 +569,10 @@ SubQuery
 				type: 'SubQuery',
 				sub_type: 'query',
 				query: $2,
-				table_alias: $4
+				table_alias: $4,
+				norm_text: function () {
+					return "(" + this.query.norm_text() + ") AS " + this.table_alias;
+				}
 			};
 		}
 	;
@@ -477,63 +580,87 @@ SubQuery
 SubQueryList
 	: SubQuery
 		{
-			$$ = [$1];
+			$$ = $1;
+		}
+	| '(' SubQueryList ')'
+		{
+			$$ = $2;
 		}
 	| SubQueryList ',' SubQuery
 		{
-			$$ = $1;
-			$$.push({
+			$$ = {
 				type: 'Join',
 				sub_type: 'cross',
-				query: $3
-			});
+				query1: $1,
+				query2: $3,
+				norm_text: function () {
+					return this.query1.norm_text() + " JOIN " + this.query2.norm_text();
+				}
+			};
 		}
 	| SubQueryList CROSS JOIN SubQuery
 		{
-			$$ = $1;
-			$$.push({
+			$$ = {
 				type: 'Join',
 				sub_type: 'cross',
-				query: $4
-			});
+				query1: $1,
+				query2: $4,
+				norm_text: function () {
+					return this.query1.norm_text() + " JOIN " + this.query2.norm_text();
+				}
+			};
 		}
-	| SubQueryList JoinQulifier SubQuery JoinCond
+	| SubQueryList JoinQulifier JOIN SubQuery JoinCond
 		{
-			$$ = $1;
-			$$.push({
+			$$ = {
 				type: 'Join',
 				sub_type: $2,
-				query: $3,
-				cond: $4
-			});
+				query1: $1,
+				query2: $4,
+				cond: $5,
+				norm_text: function () {
+					return this.query1.norm_text() + " " + this.sub_type + " " + this.query2.norm_text() + " ON " + this.cond.norm_text();
+				}
+			};
 		}
 	| SubQueryList JOIN SubQuery JoinCond
 		{
-			$$ = $1;
-			$$.push({
+			$$ = {
 				type: 'Join',
 				sub_type: 'inner',
-				query: $3,
-				cond: $4
-			});
+				query1: $1,
+				query2: $3,
+				cond: $4,
+				norm_text: function () {
+					return this.query1.norm_text() + " JOIN " + this.query2.norm_text() + " ON " + this.cond.norm_text();
+				}
+			};
 		}
 	;
 
 WhereClause
-	:
+	: WHERE LogicExpr
 		{
-			$$ = null;
-		}
-	| WHERE LogicExpr
-		{
-			$$ = $2;
+			$$ = {
+				type: 'WhereClause',
+				value: $2,
+				norm_text: function () {
+					return "WHERE " + this.value.norm_text();
+				}
+			};
 		}
 	;
 
 GroupbyClause
-	:
+	: GROUP BY Identifier
 		{
-			$$ = null;
+			$$ = {
+				type: 'GroupbyClause',
+				value: $3,
+				norm_text: function () {
+					return "GROUP BY " + this.value.norm_text();
+				}
+			};
 		}
 	;
 
@@ -543,7 +670,8 @@ Orderby
 			$$ = {
 				type: 'Orderby',
 				name: $1,
-				asc: true
+				asc: true,
+				norm_text: function () { return this.name.norm_text(); }
 			};
 		}
 	| Identifier ASC
@@ -551,7 +679,8 @@ Orderby
 			$$ = {
 				type: 'Orderby',
 				name: $1,
-				asc: true
+				asc: true,
+				norm_text: function () { return this.name.norm_text(); }
 			};
 		}
 	| Identifier DESC
@@ -559,7 +688,8 @@ Orderby
 			$$ = {
 				type: 'Orderby',
 				name: $1,
-				asc: false
+				asc: false,
+				norm_text: function () { return this.name.norm_text() + " DESC"; }
 			};
 		}
 	;
@@ -567,19 +697,36 @@ Orderby
 OrderbyList
 	: Orderby
 		{
-			$$ = [$1];
+			$$ = {
+				type: 'OrderbyList',
+				values: [$1],
+				norm_text: function () {
+					return this.values.join(",");
+				}
+			};
 		}
 	| OrderbyList ',' Orderby
 		{
-			$$ = $1;
-			$$.push($3);
+			$$ = {
+				type: 'OrderbyList',
+				values: $1.concat($3),
+				norm_text: function () {
+					return this.values.join(",");
+				}
+			};
 		}
 	;
 
 OrderbyClause
 	: ORDER BY OrderbyList
 		{
-			$$ = $3;
+			$$ = {
+				type: 'OrderbyClause',
+				value: $3,
+				norm_text: function () {
+					return "ORDER BY " + this.value.norm_text();
+				}
+			};
 		}
 	;
 
@@ -587,16 +734,35 @@ OutputList
 	: '*'
 		{
 			$$ = {
-				type: '*'
+				type: 'output_list',
+				values: [{
+					type: 'star',
+					norm_text: function () { return "*"; }
+				}]
 			};
 		}
 	| ExprList
 		{
-			$$ = $1;
+			$$ = {
+				type: 'output_list',
+				values: [].concat($1),
+				norm_text: function () {
+					return norm_array(this.values);
+				}
+			};
 		}
 	| '*' ',' ExprList
 		{
-			$$ = [ { type: '*' }, $3 ];
+			$$ = {
+				type: 'output_list',
+				values: [{
+					type: 'star',
+					norm_text: function () { return "*"; }
+				}].concat($3),
+				norm_text: function () {
+					return norm_array(this.values);
+				}
+			};
 		}
 	;
 
@@ -606,7 +772,38 @@ SelectStmt
 		{
 			$$ = {
 				type: 'SelectStmt',
-				output_list: $2
+				output: $2,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text();
+				}
+			};
+		}
+	| SELECT OutputList FROM SubQueryList
+		{
+			$$ = {
+				type: 'SelectStmt',
+				output: $2,
+				from: $4,
+				where: null,
+				groupby: null,
+				orderby: null,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text() + " FROM " + this.from.norm_text();
+				}
+			};
+		}
+	| SELECT OutputList FROM SubQueryList WhereClause
+		{
+			$$ = {
+				type: 'SelectStmt',
+				output: $2,
+				from: $4,
+				where: $5,
+				groupby: null,
+				orderby: null,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text() + " FROM " + this.from.norm_text() + " WHERE " + this.where.norm_text();
+				}
 			};
 		}
 	| SELECT OutputList FROM SubQueryList WhereClause OrderbyClause
@@ -616,7 +813,41 @@ SelectStmt
 				output: $2,
 				from: $4,
 				where: $5,
-				orderby: $6
+				groupby: null,
+				orderby: $6,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text() + " FROM " + this.from.norm_text() + " WHERE " + this.where.norm_text()
+						+ " ORDER BY " + this.orderby.norm_text();
+				}
+			};
+		}
+	| SELECT OutputList FROM SubQueryList WhereClause GroupbyClause OrderbyClause
+		{
+			$$ = {
+				type: 'SelectStmt',
+				output: $2,
+				from: $4,
+				where: $5,
+				groupby: $6,
+				orderby: $7,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text() + " FROM " + this.from.norm_text() + " WHERE " + this.where.norm_text()
+						+ " GROUP BY " + this.groupby.norm_text() + " ORDER BY " + this.orderby.norm_text();
+				}
+			};
+		}
+	| SELECT OutputList FROM SubQueryList OrderbyClause
+		{
+			$$ = {
+				type: 'SelectStmt',
+				output: $2,
+				from: $4,
+				where: null,
+				groupby: null,
+				orderby: $5,
+				norm_text: function () {
+					return "SELECT " + this.output.norm_text() + " FROM " + this.from.norm_text() + " ORDER BY " + this.orderby.norm_text();
+				}
 			};
 		}
 	;
@@ -670,4 +901,19 @@ function make_keyword_or_identifier(token) {
 		default:
 			return 'IDENTIFIER';
 	}
+}
+
+function escape_string(val) {
+	return val.replace("'", "''");
+}
+
+function norm_array(arr) {
+	return arr.map(function (item) {
+		return item.norm_text();
+	}).join(",");
+}
+
+function norm_expr (expr_obj, prec) {
+	var text = expr_obj.norm_text();
+	return expr_obj.prec && prec && prec > expr_obj.prec ? "(" + text + ")" : text;
 }
